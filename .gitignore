@@ -1,0 +1,40 @@
+# --- Environment & IDE ---
+.venv/
+env/
+venv/
+.idea/
+.vscode/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Build artifacts ---
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+MANIFEST
+pip-wheel-metadata/
+
+# --- Test / coverage ---
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.dmypy.json
+.pyre/
+.pytype/
+.cache/
+
+# --- Type checker / linters ---
+.ruff_cache/
+.pyright/
+*.log
+
+# --- Local config & OS cruft ---
+*.env
+.env.*
+.DS_Store
+Thumbs.db
