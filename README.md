@@ -76,7 +76,7 @@ app.add_websocket_route("/ws", router)
 ```ts
 import { ObservableSocket } from "@djanext/observable-socket"
 
-const socket = new ObservableSocket("wss://example.com/ws")
+const socket = new ObservableSocket("math","wss://example.com/ws")
 
 socket.sendAndWait("math/sum", [1, 2, 3, 4]).then(console.log)
 // -> { sum: 10 }
