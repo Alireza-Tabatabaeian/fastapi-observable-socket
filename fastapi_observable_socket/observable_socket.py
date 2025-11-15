@@ -166,7 +166,7 @@ async def process_request(ws: WebSocket, request: Request, route: Route):
     message_data = request.get_data()
     track_id = request.track_id
 
-    local_hydrated: Any = None
+    local_hydrated: dict = {}
 
     try:
         # first checks if incoming data is ok (value validation, data availability, ...)
