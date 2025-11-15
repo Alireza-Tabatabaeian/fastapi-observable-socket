@@ -1,21 +1,20 @@
 # fastapi_observable_socket
 
-A tiny, ergonomic **WebSocket router** for FastAPI — designed as the **backend counterpart** of the
+A tiny, ergonomic **WebSocket router** for FastAPI — designed as the backend counterpart of the
 [`ObservableSocket`](https://www.npmjs.com/package/@djanext/observable-socket) TypeScript client.
 
-Together, they provide a minimal, consistent request/response and subscription layer
-for real-time apps without the complexity of full JSON-RPC frameworks.
+Together, they offer a minimal, predictable request/response layer for real‑time apps without the complexity of RPC frameworks.
 
 ---
 
 ## ✨ Features
 
-- **Route by `route` (aka `path`)** with correlation via `uuid` (aka `track_id`)
-- **Per-route hooks**: `access(ws, message)`, `hydrate(ws, message)`, `dehydrate(payload)`
-- **Clear message envelopes** using `Request` and `Response` Pydantic models
-- **Graceful error mapping** (400/403/404/500)
-- **Optional PING→PONG heartbeat**
-- **Seamless integration with ObservableSocket (JS/TS)**
+- Route by `route` (aka `path`) with `uuid` correlation  
+- Per‑route hooks: `data_check`, `access`, `hydrate`, `dehydrate`  
+- Typed message envelopes (`Request`, `Response`)  
+- Graceful error mapping (400/403/404/500)  
+- Optional PING→PONG heartbeat  
+- Fully compatible with ObservableSocket (JS/TS)
 
 ---
 
@@ -25,32 +24,29 @@ for real-time apps without the complexity of full JSON-RPC frameworks.
 pip install fastapi-observable-socket
 ```
 
-Requires **FastAPI ≥ 0.115** and **Python ≥ 3.11**.
+Requires FastAPI ≥ 0.115 and Python ≥ 3.11.
 
 ---
 
-## 🧭 Message schema
+## 🧭 Message Schema
 
 ```jsonc
-// Request (from client)
+// Request
 {
-  "uuid": 123,                 // or "track_id"
-  "route": "math/sum",         // or "path"
+  "uuid": 123,
+  "route": "math/sum",
   "headers": { "x-user": "42" },
   "payload": [1, 2, 3, 4]
 }
 
-// Response (from server)
+// Response
 {
   "uuid": 123,
   "status": 200,
-  "headers": { "unit": "test" },
-  "payload": { "sum": 10 }
+  "headers": {"unit":"test"},
+  "payload": {"sum":10}
 }
 ```
-
-The client can send `{ "uuid": 0, "route": "PING" }` and expect
-`{ "uuid": 0, "route": "PONG" }` (as `Request`) for a simple heartbeat.
 
 ---
 
@@ -65,227 +61,168 @@ router = SocketRouter()
 
 @router.route("math/sum")
 async def sum_handler(ws, headers, payload):
-    total = sum(payload or [])
-    return {"status": Status.OK, "payload": {"sum": total}}
+    return {"status": Status.OK, "payload": {"sum": sum(payload or [])}}
 
 app.add_websocket_route("/ws", router)
-```
-
-**Client (using ObservableSocket):**
-
-```ts
-import { ObservableSocket } from "@djanext/observable-socket"
-
-const socket = new ObservableSocket("math","wss://example.com/ws")
-
-socket.sendAndWait("math/sum", [1, 2, 3, 4]).then(console.log)
-// -> { sum: 10 }
 ```
 
 ---
 
 ## ⚙️ Route Options
 
-Each route may define lifecycle hooks:
+Each route can define:
+
+- **data_check(message[, local]) → bool**  
+  Early validation. May mutate `local` (a dict) to store lightweight cached values.
+
+- **access(ws, message[, local]) → bool**  
+  Access logic. May fetch data (DB, external source) and store it in `local`.
+
+- **hydrate(ws, message) → Any**  
+  Builds handler arguments. If defined, it overrides any cached value in `local`.
+
+- **dehydrate(payload) → Any**  
+  Final output transformation (serialization, shaping, redaction, etc.).
+
+---
+
+## 🧩 Handler Argument Behavior
+
+Depending on hooks:
+
+| Situation | Handler receives |
+|----------|------------------|
+| No `hydrate`, no cached data | `(ws, headers, payload)` |
+| Cached value stored in `local["value"]` | handler receives that cached value |
+| `hydrate` is defined | handler receives hydrate's return value (highest priority) |
+
+General rule:  
+> `hydrate` > cached `local` > `(ws, headers, payload)`.
+
+---
+
+## 🔥 Example — Fetch Once, Use Twice
+
+This example shows how to validate, authorize, fetch an article **once**, and reuse it later.
 
 ```python
-@router.route("data/load", options={
-    "access":    async def access(ws, msg): return True,
-    "hydrate":   async def hydrate(ws, msg): return (ws, msg.headers, msg.payload),
-    "dehydrate": async def dehydrate(payload): return payload,
-})
-async def load_handler(ws, headers, payload):
-    return {"status": Status.OK, "headers": {"demo": "1"}, "payload": {"rows": 5}}
-```
-
-| Hook                                           | Signature | Description                                                        |
-|------------------------------------------------|------------|--------------------------------------------------------------------|
-| `access(ws: WebSocket, message: MessageData)`  | → `bool` | Authorization check (return False → 403)                           |
-| `hydrate(ws: WebSocket, message: MessageData)` | → Any | Modify/unwrap input before handler (e.g., deserialize objects) |
-| `dehydrate(payload: Any)`                      | → Any | Modify/unwrap output after handler (e.g., serialize objects)   |
-
-
-### Example of advanced route options
-
-```python
-from fastapi import FastAPI, Depends
-from starlette.websockets import WebSocket
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import FastAPI
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.websockets import WebSocket
+from fastapi_observable_socket import (
+    MessageData, SocketRouter, HandlerResult, Status
+)
 
-from fastapi_observable_socket import MessageData, SocketRouter, HandlerResult, Status
 from .models import Article
 from .db import get_async_db
 
+
 app = FastAPI()
+router = SocketRouter()
 
-WHITE_LIST = ["127.0.0.1", ...]
 
-async def socket_access_whitelist(ws: WebSocket):
-    return ws.scope["client"][0] in WHITE_LIST  # only allow listed IPs
+async def data_check_article(message: MessageData, local: dict) -> bool:
+    try:
+        local["article_id"] = int(message.headers.get("article"))
+    except (TypeError, ValueError):
+        return False
+    return True
 
-router = SocketRouter(access_logic=socket_access_whitelist)
 
-async def get_article_item(article_id: int, db: AsyncSession = Depends(get_async_db)) -> Article | None:
+async def access_article(ws: WebSocket, message: MessageData, local: dict) -> bool:
+    db: AsyncSession = ws.scope["db"]
+    article_id = local["article_id"]
+
     result = await db.execute(select(Article).where(Article.id == article_id))
-    return result.scalar_one_or_none()
+    article = result.scalar_one_or_none()
 
-async def article_access(ws: WebSocket, message: MessageData) -> bool:
-    article_id = message.headers.get("article")
-    if article_id is None:
-        return False
-    article = await get_article_item(article_id)
     if article is None:
-        return False
+        local["value"] = None
+        return True
+
+    local["value"] = article  # cached for later
+
+    user = ws.scope.get("user")
     if article.access == "PUBLIC":
         return True
-    user = ws.scope["user"]
     if article.access == "MEMBERS":
         return user is not None
     return article.author == user
 
-async def load_article(ws: WebSocket, message: MessageData) -> Article:
-    # in this special case, this function returns an Article even though `get_article_item`'s output contains None
-    # that's because this function gets called after `article_access` and it denies rest of process if article is missing
-    # so the app is responding with wrong status (403 instead of 404) in exchange for less resource consumption
-    article_id = message.headers.get("article")
-    return await get_article_item(article_id)
-
-async def serialize_article(article: Article):
+async def article_to_json(article:Article) -> dict:
     return {
-        "title": article.title,
-        "author": article.author.name,
-        "body": article.content
+            "title": article.title,
+            "author": article.author.name,
+            "body": article.content,
+        }
+
+
+# hydrate is omitted intentionally — cached article will be used
+@router.route("get-article", options={
+    "data_check": data_check_article,
+    "access": access_article,
+    "dehydrate": article_to_json
+})
+async def get_article(local: dict) -> HandlerResult:
+    if local["value"] is None:
+        return {"status": Status.NOT_FOUND, "payload": {"message": "not found"}}
+
+    return {
+        "status": Status.OK,
+        "payload": local["value"]
     }
 
-@router.route("get-article", options={
-    "access": article_access,
-    "hydrate": load_article,
-    "dehydrate": serialize_article
-})
-async def get_article(article: Article) -> HandlerResult:
-    return {"status": Status.OK, "headers": {}, "payload": article}
 
-app.add_websocket_route("/ws", router)
+@app.websocket("/ws")
+async def websocket_router(ws: WebSocket):
+    # Attach DB, user, etc. into ws.scope beforehand
+    router(ws)
 ```
 
-**Backend flow summary**
-- The socket won't be accepted if client IP is not in `WHITE_LIST`
-- When client sends `{"route": "get-article", "uuid": "SOME_HASH", "headers": {"article": 15}, "payload":null}`:
-  - `article_access` method gets called automatically and cheks if user can view the Article-15 or not if denies it responds with 403 status
-  - if access granted `load_article` will be called automatically and fetches Article-15 from db
-  - now `get_article` gets called and Article-15 will be passed to it as parameter
-  - at the final stage the output of `get_article` will be passed to `serialize_article` and it's output will be sent as responds payload
+### What happens:
 
-Result: full request lifecycle handled automatically — no extra boilerplate.
-
----
-
-## 🧩 Handler argument behavior
-
-The handler’s parameters depend on whether you’ve defined a `hydrate` function in the route options.
-
-| Case | What the handler receives | Example signature |
-|------|----------------------------|-------------------|
-| **Without `hydrate`** | The router automatically unpacks the `Request` into **three** arguments: `ws`, `headers`, and `payload`. | `async def handler(ws: WebSocket, headers: dict, payload: Any)` |
-| **With `hydrate`** | The router calls your `hydrate(ws, message)` function first, and **passes its return value** directly to the handler. | If `hydrate` returns a single object → `async def handler(obj)`<br> If it returns multiple values → `async def handler(a, b, c)` |
-
-### 🧠 How it works
-
-1. When a request arrives, the router builds a `MessageData` object (`headers`, `payload`, etc.).  
-2. If a `hydrate` function is defined, it’s awaited first:
-   ```python
-   hydrated_value = await hydrate(ws, message)
-   ```
-3. The **return value** of `hydrate` becomes the handler’s input.  
-   - If it’s a single value, it’s passed as one argument.  
-   - If it’s a tuple, it’s unpacked.  
-4. If no `hydrate` function exists, the handler simply receives `(ws, headers, payload)`.
-
-### 💡 Examples
-
-#### Example A — Without `hydrate`
-```python
-@router.route("sum")
-async def sum_handler(ws, headers, payload):
-    return {"status": Status.OK, "payload": sum(payload)}
-```
-
-#### Example B — With `hydrate` returning a single object
-```python
-async def load_article(ws, message):
-    article_id = message.headers["article"]
-    return await Article.get(article_id)
-
-@router.route("get-article", options={ "hydrate": load_article })
-async def get_article(article):
-    return {"status": Status.OK, "payload": serialize(article)}
-```
-
-#### Example C — With `hydrate` returning multiple values
-```python
-async def load_user_and_post(ws, message):
-    user = await get_user(message.headers["user_id"])
-    post = await get_post(message.headers["post_id"])
-    return user, post
-
-@router.route("user-post", options={ "hydrate": load_user_and_post })
-async def user_post_handler(user, post):
-    ...
-```
-
-In short:  
-> If you don’t define `hydrate`, you always receive `(ws, headers, payload)`.  
-> If you do define it, you decide what the handler receives — whatever your `hydrate` returns.
-
+- `data_check_article` validates header & stores `article_id`  
+- `access_article` loads the article once, caches it in `local["value"]`, checks access  
+- Because no `hydrate` is defined, handler receives the cached article  
+- if article is fetched when checking access, `get_article()` returns status 200 and that article, else it returns status 404 and not found message
+- if `get_article()` returns status 200 (200 <= status < 300), then the payload part which is the actual article will be sent to `article_to_json()` and serialized there. the result will replace output payload.
 ---
 
 ## 🔢 Status Codes
 
-Application-level statuses (not HTTP handshakes):
-
 | Code | Meaning |
-|------|----------|
-| `200` | OK |
-| `400` | BAD_REQUEST |
-| `403` | FORBIDDEN |
-| `404` | NOT_FOUND |
-| `500` | INTERNAL_SERVER_ERROR |
-| `402` | PENDING (custom, optional) |
+|------|---------|
+| 200 | OK |
+| 400 | BAD_REQUEST |
+| 403 | FORBIDDEN |
+| 404 | NOT_FOUND |
+| 500 | INTERNAL_SERVER_ERROR |
+| 402 | PENDING |
 
 ---
 
 ## 🧰 Python Compatibility
 
-The package supports **Python 3.11 → 3.13+** with zero API differences.
+| Python | Behavior |
+|--------|----------|
+| **3.13+** | Uses native `asyncio.Queue.shutdown()` |
+| **3.11–3.12** | Uses internal compat shim with sentinel shutdown |
 
-| Python Version | Behavior |
-|----------------|-----------|
-| **3.13 +** | Uses the native `asyncio.Queue.shutdown()` and `QueueShutDown` for clean task signaling. |
-| **3.11 – 3.12** | Uses a lightweight **compatibility shim** (`compat.py`) that emulates queue shutdown via a sentinel object, ensuring identical runtime behavior. |
-
-At runtime, the package automatically detects your Python version and selects the right implementation, so no action is needed on your part.
+Zero API differences.
 
 ---
 
-## 🧠 Why this package?
+## 🧠 Why This Package?
 
-| Package | Core model | Distinctive feature | Client story |
-|----------|-------------|--------------------|---------------|
-| **fastapi_observable_socket** | Route + UUID | Lightweight, hookable routing; ObservableSocket compatible | [ObservableSocket (npm)](https://www.npmjs.com/package/@djanext/observable-socket) |
-| fastapi-websocket-rpc | JSON-RPC | Full RPC semantics | Python client |
-| fastapi-websocket-pubsub | Pub/Sub | Multicast topics | Python client |
-| fastapi-ws-router | Typed event router | Pydantic event unions | No official client |
+| Package | Model | Feature | Client Story |
+|---------|--------|----------|--------------|
+| **fastapi_observable_socket** | Route + UUID | Lightweight, hookable, ObservableSocket support | JS/TS client |
+| fastapi-websocket-rpc | JSON-RPC | Full RPC | Python client |
+| fastapi-websocket-pubsub | PubSub | Multicast topics | Python client |
+| fastapi-ws-router | Typed events | Pydantic unions | No official client |
 
-This package sits neatly between low-level Starlette websockets and full RPC frameworks — minimal, expressive, and production-ready.
-
----
-
-## 🧪 Testing
-
-- Verify request/response correlation via `uuid`.
-- Simulate concurrent clients (10–100) sending mixed payloads.
-- Confirm clean disconnects and graceful error handling.
+A middle ground between raw Starlette WebSockets and heavy RPC systems.
 
 ---
 
@@ -295,7 +232,245 @@ MIT
 
 ---
 
-### 🧩 Related projects
+### Related
 
-- **Frontend:** [ObservableSocket (npm)](https://www.npmjs.com/package/@djanext/observable-socket)
-- **Backend:** this repository
+- Frontend: https://www.npmjs.com/package/@djanext/observable-socket
+- Backend: this repository
+# fastapi_observable_socket
+
+A tiny, ergonomic **WebSocket router** for FastAPI — designed as the backend counterpart of the
+[`ObservableSocket`](https://www.npmjs.com/package/@djanext/observable-socket) TypeScript client.
+
+Together, they offer a minimal, predictable request/response layer for real‑time apps without the complexity of RPC frameworks.
+
+---
+
+## ✨ Features
+
+- Route by `route` (aka `path`) with `uuid` correlation  
+- Per‑route hooks: `data_check`, `access`, `hydrate`, `dehydrate`  
+- Typed message envelopes (`Request`, `Response`)  
+- Graceful error mapping (400/403/404/500)  
+- Optional PING→PONG heartbeat  
+- Fully compatible with ObservableSocket (JS/TS)
+
+---
+
+## 🚀 Installation
+
+```bash
+pip install fastapi-observable-socket
+```
+
+Requires FastAPI ≥ 0.115 and Python ≥ 3.11.
+
+---
+
+## 🧭 Message Schema
+
+```jsonc
+// Request
+{
+  "uuid": 123,
+  "route": "math/sum",
+  "headers": { "x-user": "42" },
+  "payload": [1, 2, 3, 4]
+}
+
+// Response
+{
+  "uuid": 123,
+  "status": 200,
+  "headers": {"unit":"test"},
+  "payload": {"sum":10}
+}
+```
+
+---
+
+## 🧩 Quickstart
+
+```python
+from fastapi import FastAPI
+from fastapi_observable_socket import SocketRouter, Status
+
+app = FastAPI()
+router = SocketRouter()
+
+@router.route("math/sum")
+async def sum_handler(ws, headers, payload):
+    return {"status": Status.OK, "payload": {"sum": sum(payload or [])}}
+
+app.add_websocket_route("/ws", router)
+```
+
+---
+
+## ⚙️ Route Options
+
+Each route can define:
+
+- **data_check(message[, local]) → bool**  
+  Early validation. May mutate `local` (a dict) to store lightweight cached values.
+
+- **access(ws, message[, local]) → bool**  
+  Access logic. May fetch data (DB, external source) and store it in `local`.
+
+- **hydrate(ws, message) → Any**  
+  Builds handler arguments. If defined, it overrides any cached value in `local`.
+
+- **dehydrate(payload) → Any**  
+  Final output transformation (serialization, shaping, redaction, etc.).
+
+---
+
+## 🧩 Handler Argument Behavior
+
+Depending on hooks:
+
+| Situation | Handler receives |
+|----------|------------------|
+| No `hydrate`, no cached data | `(ws, headers, payload)` |
+| Cached value stored in `local["value"]` | handler receives that cached value |
+| `hydrate` is defined | handler receives hydrate's return value (highest priority) |
+
+General rule:  
+> `hydrate` > cached `local` > `(ws, headers, payload)`.
+
+---
+
+## 🔥 Example — Fetch Once, Use Twice
+
+This example shows how to validate, authorize, fetch an article **once**, and reuse it later.
+
+```python
+from fastapi import FastAPI
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.websockets import WebSocket
+from fastapi_observable_socket import (
+    MessageData, SocketRouter, HandlerResult, Status
+)
+
+from .models import Article
+from .db import get_async_db
+
+
+app = FastAPI()
+router = SocketRouter()
+
+
+async def data_check_article(message: MessageData, local: dict) -> bool:
+    try:
+        local["article_id"] = int(message.headers.get("article"))
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+async def access_article(ws: WebSocket, message: MessageData, local: dict) -> bool:
+    db: AsyncSession = ws.scope["db"]
+    article_id = local["article_id"]
+
+    result = await db.execute(select(Article).where(Article.id == article_id))
+    article = result.scalar_one_or_none()
+
+    if article is None:
+        local["value"] = None
+        return True
+
+    local["value"] = article  # cached for later
+
+    user = ws.scope.get("user")
+    if article.access == "PUBLIC":
+        return True
+    if article.access == "MEMBERS":
+        return user is not None
+    return article.author == user
+
+async def article_to_json(article:Article) -> dict:
+    return {
+            "title": article.title,
+            "author": article.author.name,
+            "body": article.content,
+        }
+
+
+# hydrate is omitted intentionally — cached article will be used
+@router.route("get-article", options={
+    "data_check": data_check_article,
+    "access": access_article,
+    "dehydrate": article_to_json
+})
+async def get_article(local: dict) -> HandlerResult:
+    if local["value"] is None:
+        return {"status": Status.NOT_FOUND, "payload": {"message": "not found"}}
+
+    return {
+        "status": Status.OK,
+        "payload": local["value"]
+    }
+
+
+@app.websocket("/ws")
+async def websocket_router(ws: WebSocket):
+    # Attach DB, user, etc. into ws.scope beforehand
+    router(ws)
+```
+
+### What happens:
+
+- `data_check_article` validates header & stores `article_id`  
+- `access_article` loads the article once, caches it in `local["value"]`, checks access  
+- Because no `hydrate` is defined, handler receives the cached article  
+- if article is fetched when checking access, `get_article()` returns status 200 and that article, else it returns status 404 and not found message
+- if `get_article()` returns status 200 (200 <= status < 300), then the payload part which is the actual article will be sent to `article_to_json()` and serialized there. the result will replace output payload.
+---
+
+## 🔢 Status Codes
+
+| Code | Meaning |
+|------|---------|
+| 200 | OK |
+| 400 | BAD_REQUEST |
+| 403 | FORBIDDEN |
+| 404 | NOT_FOUND |
+| 500 | INTERNAL_SERVER_ERROR |
+| 402 | PENDING |
+
+---
+
+## 🧰 Python Compatibility
+
+| Python | Behavior |
+|--------|----------|
+| **3.13+** | Uses native `asyncio.Queue.shutdown()` |
+| **3.11–3.12** | Uses internal compat shim with sentinel shutdown |
+
+Zero API differences.
+
+---
+
+## 🧠 Why This Package?
+
+| Package | Model | Feature | Client Story |
+|---------|--------|----------|--------------|
+| **fastapi_observable_socket** | Route + UUID | Lightweight, hookable, ObservableSocket support | JS/TS client |
+| fastapi-websocket-rpc | JSON-RPC | Full RPC | Python client |
+| fastapi-websocket-pubsub | PubSub | Multicast topics | Python client |
+| fastapi-ws-router | Typed events | Pydantic unions | No official client |
+
+A middle ground between raw Starlette WebSockets and heavy RPC systems.
+
+---
+
+## 📦 License
+
+MIT
+
+---
+
+### Related
+
+- Frontend: https://www.npmjs.com/package/@djanext/observable-socket
+- Backend: this repository
