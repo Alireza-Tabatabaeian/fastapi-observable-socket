@@ -15,7 +15,10 @@ class HandlerResult(TypedDict, total=False):
     payload: Optional[Any]
 
 
-AccessCheck = Callable[[WebSocket, MessageData], Awaitable[bool]]
+FormatCheck = Callable[[MessageData, Any], Awaitable[bool]] | Callable[[MessageData], Awaitable[bool]]
+
+
+AccessCheck = Callable[[WebSocket, MessageData, Any], Awaitable[bool]] | Callable[[WebSocket, MessageData], Awaitable[bool]]
 
 
 HydrateFunction = Callable[[WebSocket,MessageData], Awaitable[UserHandlerParams]]
@@ -29,6 +32,7 @@ if set its return value, will be returned as payload to user
 """
 
 class RouteOptions(TypedDict, total=False):
+    data_check: Optional[FormatCheck]
     access: Optional[AccessCheck]
     hydrate: Optional[HydrateFunction]
     dehydrate: Optional[DehydrateFunction]

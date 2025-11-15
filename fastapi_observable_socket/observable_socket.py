@@ -7,13 +7,13 @@ from typing import Callable, Dict
 
 from pydantic import ValidationError
 from starlette.websockets import WebSocket
-from typing_extensions import Awaitable
+from typing_extensions import Awaitable, Any
 
 from .compat import QueueShutDown, queue_shutdown
 from .message import Request, Response, Header, Payload
 from .response_sender import send_response
 from .route_options import RouteOptions, HydrateFunction, DehydrateFunction, AccessCheck, HandlerResult, \
-    UserHandlerParams
+    UserHandlerParams, FormatCheck
 from .status import Status
 
 # function types
@@ -23,8 +23,8 @@ SocketAccess = Callable[[WebSocket], Awaitable[bool]]
 Socket Access function can use websocket.headers or websocket.scope to check if connection is allowed or not.
 """
 
-Handler = Callable[[UserHandlerParams], Awaitable[HandlerResult]] | Callable[
-    [WebSocket, Header, Payload], Awaitable[HandlerResult]]
+Handler = Callable[[UserHandlerParams], Awaitable[HandlerResult]] | Callable[[WebSocket, Header, Payload], Awaitable[HandlerResult]]
+
 """
 If user doesn't set a hydration for the route, then WebSocket, Headers and Payload will be sent to handler function.
 Else if the user provide the hydration for the route then the output of hydration function will be sent to handler function.
@@ -166,11 +166,23 @@ async def process_request(ws: WebSocket, request: Request, route: Route):
     message_data = request.get_data()
     track_id = request.track_id
 
+    local_hydrated: Any = None
+
     try:
-        # first checks if user can call path with posted data (Content Access or similar checks)
+        # first checks if incoming data is ok (value validation, data availability, ...)
+        data_check: FormatCheck = options.get('data_check', None)
+        if data_check is not None:
+            if not await data_check(message_data, local_hydrated):
+                return Response(
+                    track_id=track_id,
+                    status=Status.BAD_REQUEST,
+                    headers=None,
+                    payload={"Message": "Data check failed"}
+                )
+        # now checks if user can call path with posted data (Content Access or similar checks)
         access_check: AccessCheck | None = options.get('access')
         if access_check is not None:
-            if not await access_check(ws, message_data):
+            if not await access_check(ws, message_data, local_hydrated):
                 return Response(
                     track_id=track_id,
                     status=Status.FORBIDDEN,
@@ -182,10 +194,10 @@ async def process_request(ws: WebSocket, request: Request, route: Route):
         if hydrate is not None:
             hydrated = await hydrate(ws, message_data)
             result = await route.handler(hydrated)
+        elif local_hydrated is not None:
+            result = await route.handler(local_hydrated)
         else:
-            payload: Payload = message_data.payload
-            headers: Header = request.headers or {}
-            result = await route.handler(ws, headers, payload)
+            result = await route.handler(ws, message_data.get('headers'), message_data.get('payload'))
 
         status = result.get('status', Status.OK)
         out_headers: Header = result.get('headers', {})
